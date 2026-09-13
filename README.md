@@ -1,71 +1,92 @@
-# Sarcopenia Severity Classification using XGBoost and Feature Selection
+# Sarcopenia Severity Classification with XGBoost and Feature Selection
 
-This repository provides the implementation of an interpretable machine learning model for classifying sarcopenia severity (**Normal, Severe Sarcopenia, Very Severe Sarcopenia**) using protein-expression data. To overcome the high dimensionality of protein-expression features, we compared multiple feature-selection techniques and validated the model performance via Leave-One-Out Cross-Validation (LOOCV) and independent validation.
+[![CI](https://github.com/RUMPELL/Sarcopenia_XGboost/actions/workflows/ci.yml/badge.svg)](https://github.com/RUMPELL/Sarcopenia_XGboost/actions/workflows/ci.yml)
 
----
+An interpretable classical-ML pipeline for classifying sarcopenia severity into three
+classes — **Normal (N)**, **Severe (S)**, **Very Severe (VS)** — from high-dimensional
+blood protein-expression data. This repository organises in code the methodology of the
+master's thesis *"Blood Protein Biomarker Signature for Sarcopenia Severity Stratification
+via Machine Learning"*: univariate feature-selection methods are compared, XGBoost is
+trained under leave-one-out cross-validation (LOOCV), and a soft-voting ensemble of the
+LOOCV models is evaluated on held-out data.
 
-## Overview
-
-We developed a robust **XGBoost-based classification model** enhanced by systematic feature selection methods: **ANOVA F-test**, **Chi-square**, and **Mutual Information**. The optimal feature subset (35 features) was selected based on LOOCV performance and interpretability. Our approach identified key predictive biomarkers that accurately discriminate sarcopenia severity classes.
-
----
-
-## Dataset and Methods
-
-- **Dataset**:
-  - 5,420 protein-expression features
-  - Three sarcopenia severity classes:
-    - **N** (Normal)
-    - **S** (Severe Sarcopenia)
-    - **VS** (Very Severe Sarcopenia)
-
-- **Validation**:
-  - Leave-One-Out Cross-Validation (LOOCV)
-  - Independent external validation set
+> The protein-expression dataset is not distributed. The scripts expect a CSV you supply.
 
 ---
 
-## Key Features
+## Problem
 
-- **Multiple Feature Selection Methods**: ANOVA F-test, Chi-square, Mutual Information
-- **LOOCV-Based Training**: Ensures unbiased model evaluation
-- **SHAP Analysis**: For model interpretability and biomarker identification
-- **External Validation**: Independent validation demonstrating generalizability
+- **Input:** 5,420 blood protein-expression features per sample, from a small clinical
+  cohort.
+- **Output:** one of three severity classes (`N`, `S`, `VS`).
+- **Challenge:** the feature count vastly exceeds the sample count, so feature selection
+  and the validation design are the central methodological questions.
 
----
+## Method
 
-## Results Summary
+| Step | Implementation |
+|---|---|
+| Scaling | `MinMaxScaler` (`scripts/preprocessing.py`) |
+| Feature selection | `SelectKBest` with **ANOVA F-test**, **χ²**, or **mutual information**, top-*k* (default 35) (`scripts/feature_selection.py`) |
+| Model | XGBoost `multi:softprob`, `max_depth=10`, `eta=0.1`, up to 1000 rounds, early stopping 30 (`main.py`) |
+| Validation | LOOCV — one XGBoost model per left-out sample. Scaling and feature selection are fitted inside each fold on the training rows only, so held-out samples never influence preprocessing (`scripts/fold_preprocessing.py`, `scripts/training.py`) |
+| Inference | Soft-voting ensemble: each fold's saved scaler + selector is applied to the raw test matrix, per-model softmax over raw margins, averaged, argmax (`scripts/validation.py`) |
+| Interpretation | SHAP biomarker ranking (thesis analysis; SHAP code is not included in this repository) |
 
-| Metric                      | Performance |
-|-----------------------------|-------------|
-| Accuracy                    | 72.7%       |
-| Macro-average F1-score      | 0.7116      |
-| Macro-average Precision     | 0.7190      |
-| Macro-average Recall        | 0.7202      |
+## Results (as reported in the thesis)
 
-### Key Biomarkers (SHAP Analysis):
+| Setting | Metric |
+|---|---|
+| 35-biomarker signature, LOOCV | AUROC 0.930 |
+| Independent external cohort (13 overlapping biomarkers) | Accuracy 78.6 % |
 
-- **SERTA domain-containing protein 2 (SERTAD2)**
-- **Homeobox protein Hox-D8 (HOXD8)**
-- **Intraflagellar transport-associated protein (IFTAP)**
-- **Receptor-type tyrosine-protein phosphatase alpha (PTPRA)**
+Top biomarkers by SHAP: SERTAD2, HOXD8, IFTAP, PTPRA.
 
----
+These figures are the values reported in the thesis. The dataset is not part of this
+repository, so they cannot be regenerated here.
 
-## Repository Structure
+## Running the pipeline
 
-```
-sarcopenia-xgboost/
-├── scripts/
-│   ├── preprocessing.py        # Data loading and preprocessing (scaling)
-│   ├── feature_selection.py    # Feature selection methods
-│   ├── training.py             # LOOCV training & model saving
-│   └── validation.py           # Ensemble predictions & evaluation
-│
-├── main.py                     # Main script for training and validation
-├── extra_validation.py         # Additional validation script
-├── requirements.txt            # Python dependencies
-└── .gitignore                  # Git ignore file
+```bash
+python -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# LOOCV training with each feature-selection method
+python main.py train --data train.csv --label Label --k 35 \
+  --methods anova chi2 mutual_info --out results
+
+# ensemble evaluation on a raw test CSV (same columns as training)
+python main.py validate --data test.csv --label Label \
+  --model_dir results/anova_k35/models --n_models <number of training samples>
+
+# tests (synthetic data only)
+python -m unittest discover -s tests -t .
 ```
 
----
+`train` writes, per method, under `results/<method>_k<k>/`:
+`loocv_losses.csv` (per-fold loss and selected feature indices),
+`loocv_oof_predictions.csv` (out-of-fold class probabilities), `models/model_{i}.json`,
+and `preproc/preproc_{i}.json`.
+
+`main.py validate` applies each fold's saved scaler and selector to the raw test matrix by
+default; pass `--preprocessed` if the CSV is already scaled and reduced to the selected
+features. `extra_validation.py` evaluates an already-preprocessed matrix with every model
+found in a directory.
+
+## Repository structure
+
+```
+main.py                       train / validate CLI
+extra_validation.py           directory-based ensemble evaluation (already-preprocessed input)
+scripts/preprocessing.py      CSV loading; scaler factory
+scripts/feature_selection.py  ANOVA / chi2 / mutual-information score functions
+scripts/fold_preprocessing.py per-fold scaler + selector, with save/load
+scripts/training.py           LOOCV training with per-fold preprocessing, model/preprocessor saving
+scripts/validation.py         model + preprocessor loading, soft-voting ensemble, report
+tests/                        synthetic unit tests (17)
+requirements.txt
+```
+
+## Status
+
+Research code accompanying the thesis. Unit tests (17) run on synthetic data in CI.
